@@ -1,0 +1,7 @@
+numpy>=1.26
+matplotlib>=3.8
+pytest>=8
+# opcionais: validação cruzada e geração do artigo
+control>=0.10
+scipy>=1.11
+python-docx>=1.1

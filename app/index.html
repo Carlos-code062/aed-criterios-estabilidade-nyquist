@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laboratório de Estabilidade</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --ink:#1b2430; --muted:#5b6675; --line:#d9dee5;
+  --accent:#1f4e79; --bad:#c0392b; --good:#16a085; --alt:#8e44ad; --grid:#eef1f5;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#11161d; --panel:#18202a; --ink:#e6ebf1; --muted:#9aa6b4; --line:#2a3644;
+    --accent:#6fa8dc; --bad:#ef7564; --good:#4fd1b0; --alt:#c39bd3; --grid:#1f2933;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#11161d; --panel:#18202a; --ink:#e6ebf1; --muted:#9aa6b4; --line:#2a3644;
+  --accent:#6fa8dc; --bad:#ef7564; --good:#4fd1b0; --alt:#c39bd3; --grid:#1f2933;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:16px;border-bottom:1px solid var(--line)}
+header h1{margin:0;font-size:18px}
+header p{margin:4px 0 0;color:var(--muted);font-size:13px}
+main{display:grid;grid-template-columns:300px 1fr;gap:16px;padding:16px;max-width:1400px;margin:auto}
+@media (max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.plots{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:700px){.plots{grid-template-columns:1fr}}
+.card h2{margin:0 0 8px;font-size:14px}
+canvas{width:100%;height:300px;display:block;cursor:crosshair}
+label{display:block;margin:10px 0 2px;color:var(--muted);font-size:12px}
+input[type=range]{width:100%}
+input[type=text],select{width:100%;padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:13px ui-monospace,monospace}
+.status{font:13px ui-monospace,monospace;white-space:pre-line}
+.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-weight:600;color:#fff}
+.ok{background:var(--good)} .no{background:var(--bad)}
+small{color:var(--muted)}
+button{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);cursor:pointer}
+</style>
+</head>
+<body>
+<header>
+  <h1>Laboratório interativo de estabilidade — Nyquist · Lugar das Raízes · Degrau</h1>
+  <p>Arraste polos (×) e zeros (○) no plano s, ou edite as listas. Ganho K e atraso τ atualizam os três diagramas em tempo real.</p>
+</header>
+<main>
+  <section class="card">
+    <label for="preset">Sistema de benchmark</label>
+    <select id="preset">
+      <option value="A">A — 3ª ordem estável</option>
+      <option value="B">B — pêndulo invertido + avanço (P=1)</option>
+      <option value="C">C — fase não-mínima + integrador</option>
+      <option value="D" selected>D — atraso de rede</option>
+    </select>
+    <label for="polos">Polos de malha aberta (separados por vírgula; complexos como -1+2j)</label>
+    <input id="polos" type="text">
+    <label for="zeros">Zeros</label>
+    <input id="zeros" type="text">
+    <label for="k">Ganho de malha K = <b id="kv"></b> (escala log)</label>
+    <input id="k" type="range" min="-3" max="3" step="0.005">
+    <label for="tau">Atraso τ = <b id="tauv"></b> s</label>
+    <input id="tau" type="range" min="0" max="2" step="0.005">
+    <p style="margin:12px 0 6px"><span id="badge" class="badge"></span></p>
+    <div class="status" id="status"></div>
+    <p><small>Z = N + P. N: voltas horárias de L(s) em torno de −1, obtidas pelo número de voltas
+    do contorno de Nyquist amostrado adaptativamente. Com τ &gt; 0 o lugar das raízes usa Padé de 3ª ordem
+    (apenas para exibição); Nyquist e degrau usam o atraso exato.</small></p>
+    <button id="tema">Alternar tema</button>
+  </section>
+  <section class="plots">
+    <div class="card"><h2>Plano s — lugar das raízes (arraste as singularidades)</h2><canvas id="cs"></canvas></div>
+    <div class="card"><h2>Diagrama de Nyquist L(jω)</h2><canvas id="cn"></canvas></div>
+    <div class="card"><h2>Resposta ao degrau em malha fechada</h2><canvas id="cy"></canvas></div>
+    <div class="card"><h2>Bode — |L| em dB (contínua) e fase (tracejada, −360° a 0°; pontilhada = −180°), eixo x = log₁₀ ω</h2><canvas id="cb"></canvas></div>
+  </section>
+</main>
+<script>
+"use strict";
+// ---------------------------------------------------------------- complexos
+const C = (re, im = 0) => ({re, im});
+const add = (a, b) => C(a.re + b.re, a.im + b.im);
+const sub = (a, b) => C(a.re - b.re, a.im - b.im);
+const mul = (a, b) => C(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+const div = (a, b) => { const d = b.re * b.re + b.im * b.im; return C((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d); };
+const abs = a => Math.hypot(a.re, a.im);
+const arg = a => Math.atan2(a.im, a.re);
+const cexp = a => { const m = Math.exp(a.re); return C(m * Math.cos(a.im), m * Math.sin(a.im)); };
+
+// --------------------------------------------------------------- polinômios
+function polyFromRoots(rs) {            // coeficientes reais, ordem decrescente
+  let p = [C(1)];
+  for (const r of rs) {
+    const q = new Array(p.length + 1).fill(0).map(() => C(0));
+    for (let i = 0; i < p.length; i++) { q[i] = add(q[i], p[i]); q[i + 1] = sub(q[i + 1], mul(p[i], r)); }
+    p = q;
+  }
+  return p.map(c => c.re);
+}
+const horner = (p, s) => p.reduce((y, c) => add(mul(y, s), C(c)), C(0));
+function polyAdd(a, b) { const n = Math.max(a.length, b.length); const A = Array(n - a.length).fill(0).concat(a), B = Array(n - b.length).fill(0).concat(b); return A.map((x, i) => x + B[i]); }
+const polyScale = (a, k) => a.map(x => x * k);
+function polyMul(a, b) { const o = Array(a.length + b.length - 1).fill(0); a.forEach((x, i) => b.forEach((y, j) => o[i + j] += x * y)); return o; }
+function roots(p) {                     // Durand–Kerner
+  while (p.length > 1 && Math.abs(p[0]) < 1e-14) p = p.slice(1);
+  const n = p.length - 1; if (n < 1) return [];
+  const a = p.map(x => x / p[0]);
+  const R = 1 + Math.max(...a.slice(1).map(Math.abs));
+  let z = Array.from({length: n}, (_, k) => mul(C(R), cexp(C(0, 2 * Math.PI * k / n + 0.4))));
+  for (let it = 0; it < 400; it++) {
+    let mv = 0;
+    z = z.map((zi, i) => {
+      let d = C(1); z.forEach((zj, j) => { if (j !== i) d = mul(d, sub(zi, zj)); });
+      const nz = sub(zi, div(horner(a, zi), d)); mv = Math.max(mv, abs(sub(nz, zi))); return nz;
+    });
+    if (mv < 1e-12 * R) break;
+  }
+  return z;
+}
+function pade(tau, n) {
+  const f = k => { let r = 1; for (let i = 2; i <= k; i++) r *= i; return r; };
+  const c = Array.from({length: n + 1}, (_, k) => f(2 * n - k) * f(n) / (f(2 * n) * f(k) * f(n - k)));
+  return { num: c.map((ck, k) => ck * (-tau) ** k).reverse(), den: c.map((ck, k) => ck * tau ** k).reverse() };
+}
+
+// ------------------------------------------------------------------ estado
+const PRESETS = {
+  A: {p: "-1, -2, -5", z: "", k: 50, tau: 0},
+  B: {p: "2, -2, -10", z: "-1", k: 100, tau: 0},
+  C: {p: "0, -2, -3", z: "1", k: -2, tau: 0},          // K(1-s) = -K(s-1)
+  D: {p: "-1, -2", z: "", k: 4, tau: 0.5},              // 2/((s+1)(0.5s+1)) = 4/((s+1)(s+2))
+};
+const st = {polos: [], zeros: [], k: 1, sinal: 1, tau: 0};
+const $ = id => document.getElementById(id);
+function parseList(t) {
+  return t.split(",").map(x => x.trim()).filter(Boolean).map(x => {
+    const m = x.replace(/\s/g, "").match(/^([+-]?[\d.]+(?:e[+-]?\d+)?)?(?:([+-][\d.]*)j)?$/i);
+    if (!m) return null;
+    const re = m[1] ? parseFloat(m[1]) : 0;
+    const im = m[2] !== undefined ? (m[2] === "+" ? 1 : m[2] === "-" ? -1 : parseFloat(m[2])) : 0;
+    return C(re, im);
+  }).filter(Boolean);
+}
+function withConjugates(rs) {           // garante coeficientes reais
+  const out = [];
+  for (const r of rs) { out.push(r); if (Math.abs(r.im) > 1e-9) out.push(C(r.re, -r.im)); }
+  return out;
+}
+const fmtC = r => Math.abs(r.im) < 1e-9 ? +r.re.toFixed(3) + "" : `${+r.re.toFixed(3)}${r.im >= 0 ? "+" : "-"}${Math.abs(+r.im.toFixed(3))}j`;
+function listText(rs) { const out = []; const used = new Set(); rs.forEach((r, i) => { if (used.has(i)) return; out.push(fmtC(r.im < 0 ? C(r.re, -r.im) : r)); if (Math.abs(r.im) > 1e-9) { const j = rs.findIndex((q, jj) => jj > i && !used.has(jj) && Math.abs(q.re - r.re) < 1e-9 && Math.abs(q.im + r.im) < 1e-9); if (j >= 0) used.add(j); } }); return out.join(", "); }
+
+function model() {
+  const P = withConjugates(st.polos), Z = withConjugates(st.zeros);
+  const den = polyFromRoots(P), num = polyScale(polyFromRoots(Z), st.k);
+  const L = s => { let g = div(horner(num, s), horner(den, s)); if (st.tau) g = mul(g, cexp(mul(C(-st.tau), s))); return g; };
+  return {P, Z, den, num, L};
+}
+
+// ----------------------------------------------------------------- Nyquist
+function nyquist(m) {
+  const eixo = [...new Set(m.P.filter(p => Math.abs(p.re) < 1e-9).map(p => p.im))].sort((a, b) => a - b);
+  const mags = m.P.concat(m.Z).map(abs).filter(x => x > 1e-9);
+  const hi = Math.max(1, ...mags, st.tau ? 1 / st.tau : 1), lo = Math.min(1, ...mags);
+  const R = 1e4 * hi, eps = 1e-4 * lo, w0 = 1e-2 * lo;
+  const segs = []; let a = -R;
+  const reta = (wa, wb) => { const ua = Math.asinh(wa / w0), ub = Math.asinh(wb / w0); return t => C(0, w0 * Math.sinh(ua + (ub - ua) * t)); };
+  for (const wk of eixo) { segs.push(reta(a, wk - eps)); segs.push(t => add(C(0, wk), mul(C(eps), cexp(C(0, -Math.PI / 2 + Math.PI * t))))); a = wk + eps; }
+  segs.push(reta(a, R));
+  segs.push(t => mul(C(R), cexp(C(0, Math.PI / 2 - Math.PI * t))));
+  let total = 0, primeiro = null, ant = null;
+  const F = s => add(C(1), m.L(s));
+  for (const seg of segs) {
+    let ts = Array.from({length: 65}, (_, i) => i / 64), Fs = ts.map(t => F(seg(t)));
+    for (let it = 0; it < 18; it++) {
+      const nt = [ts[0]], nF = [Fs[0]]; let mudou = false;
+      for (let i = 1; i < ts.length; i++) {
+        if (Math.abs(arg(div(Fs[i], Fs[i - 1]))) > 0.15 && ts.length < 60000) { const tm = (ts[i] + ts[i - 1]) / 2; nt.push(tm); nF.push(F(seg(tm))); mudou = true; }
+        nt.push(ts[i]); nF.push(Fs[i]);
+      }
+      ts = nt; Fs = nF; if (!mudou) break;
+    }
+    for (const f of Fs) { if (ant) total += arg(div(f, ant)); else primeiro = f; ant = f; }
+  }
+  total += arg(div(primeiro, ant));
+  const w = Math.round(total / (2 * Math.PI));
+  const Pn = m.P.filter(p => p.re > 1e-9).length;
+  return {P: Pn, N: -w, Z: -w + Pn};
+}
+function margens(m) {
+  const fase = w => { const s = C(0, w); let f = (st.k >= 0 ? 0 : Math.PI); m.Z.forEach(z => f += arg(sub(s, z))); m.P.forEach(p => f -= arg(sub(s, p))); return f - w * st.tau; };
+  const lm = w => Math.log(abs(m.L(C(0, w))));
+  const ws = Array.from({length: 3000}, (_, i) => 10 ** (-3 + 6 * i / 2999));
+  const bis = (g, a, b) => { let ga = g(a); for (let i = 0; i < 80; i++) { const c = Math.sqrt(a * b), gc = g(c); if (Math.sign(gc) === Math.sign(ga)) { a = c; ga = gc; } else b = c; } return Math.sqrt(a * b); };
+  let mf = Infinity, wgc = NaN, mg = Infinity, wpc = NaN;
+  for (let i = 1; i < ws.length; i++) {
+    if (Math.sign(lm(ws[i])) !== Math.sign(lm(ws[i - 1]))) {
+      const wc = bis(lm, ws[i - 1], ws[i]); let ph = fase(wc) * 180 / Math.PI; ph = ((ph + 360) % 360 + 360) % 360 - 180;
+      if (ph < mf) { mf = ph; wgc = wc; }
+    }
+    const h = w => (fase(w) + Math.PI) / (2 * Math.PI);
+    const k0 = Math.floor(h(ws[i - 1])), k1 = Math.floor(h(ws[i]));
+    if (k0 !== k1) { const alvo = Math.max(k0, k1); const wp = bis(w => h(w) - alvo, ws[i - 1], ws[i]); const g = 1 / abs(m.L(C(0, wp))); if (Math.abs(Math.log(g)) < Math.abs(Math.log(mg))) { mg = g; wpc = wp; } }
+  }
+  // cruzamento em ω = 0 (L(0) real negativo, típico de P > 0)
+  const L0 = m.L(C(0, 0));
+  if (isFinite(L0.re) && L0.re < 0 && Math.abs(L0.im) < 1e-9) { const g = 1 / Math.abs(L0.re); if (Math.abs(Math.log(g)) < Math.abs(Math.log(mg))) { mg = g; wpc = 0; } }
+  return {mg, wpc, mf, wgc, dm: mf > 0 && isFinite(mf) ? (mf * Math.PI / 180) / wgc : 0};
+}
+
+// --------------------------------------------------------------- degrau
+function degrau(m, T = 20, dt = 2e-3) {
+  const den = m.den, num = m.num, a0 = den[0];
+  const n = den.length - 1;
+  const d = den.map(x => x / a0), b = Array(n + 1 - num.length).fill(0).concat(num.map(x => x / a0));
+  const D = b[0], Cc = b.slice(1).map((x, i) => x - D * d[i + 1]);
+  const f = (x, u) => x.map((_, i) => i === 0 ? -d.slice(1).reduce((s, c, j) => s + c * x[j], 0) + u : x[i - 1]);
+  let x = Array(n).fill(0); const nd = Math.round(st.tau / dt); const buf = Array(Math.max(nd, 1)).fill(0);
+  const ys = [];
+  for (let k = 0; k * dt < T; k++) {
+    let u, y;
+    if (nd) { u = buf[k % nd]; y = Cc.reduce((s, c, i) => s + c * x[i], 0) + D * u; buf[k % nd] = 1 - y; }
+    else { y = (Cc.reduce((s, c, i) => s + c * x[i], 0) + D) / (1 + D); u = 1 - y; }
+    if (!isFinite(y) || Math.abs(y) > 1e3) break;
+    ys.push([k * dt, y]);
+    const k1 = f(x, u), k2 = f(x.map((v, i) => v + dt / 2 * k1[i]), u), k3 = f(x.map((v, i) => v + dt / 2 * k2[i]), u), k4 = f(x.map((v, i) => v + dt * k3[i]), u);
+    x = x.map((v, i) => v + dt / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
+  }
+  return ys;
+}
+
+// ---------------------------------------------------------------- desenho
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function prep(cv) {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = css("--panel"); g.fillRect(0, 0, r.width, r.height);
+  return {g, W: r.width, H: r.height};
+}
+function eixos(ctx, xr, yr) {
+  const {g, W, H} = ctx, pad = 30;
+  const X = x => pad + (x - xr[0]) / (xr[1] - xr[0]) * (W - pad - 8), Y = y => H - pad - (y - yr[0]) / (yr[1] - yr[0]) * (H - pad - 8);
+  g.strokeStyle = css("--grid"); g.lineWidth = 1; g.fillStyle = css("--muted"); g.font = "10px system-ui";
+  const tick = (r) => { const s = 10 ** Math.floor(Math.log10((r[1] - r[0]) / 4)); const m = [1, 2, 5, 10].find(m => (r[1] - r[0]) / (m * s) <= 6) * s; const o = []; for (let v = Math.ceil(r[0] / m) * m; v <= r[1]; v += m) o.push(+v.toFixed(10)); return o; };
+  tick(xr).forEach(v => { g.beginPath(); g.moveTo(X(v), 8); g.lineTo(X(v), H - pad); g.stroke(); g.fillText(v, X(v) - 6, H - pad + 13); });
+  tick(yr).forEach(v => { g.beginPath(); g.moveTo(pad, Y(v)); g.lineTo(W - 8, Y(v)); g.stroke(); g.fillText(v, 2, Y(v) + 3); });
+  g.strokeStyle = css("--muted"); g.beginPath();
+  if (xr[0] < 0 && xr[1] > 0) { g.moveTo(X(0), 8); g.lineTo(X(0), H - pad); }
+  if (yr[0] < 0 && yr[1] > 0) { g.moveTo(pad, Y(0)); g.lineTo(W - 8, Y(0)); }
+  g.stroke();
+  return {X, Y, inv: (px, py) => C(xr[0] + (px - pad) / (W - pad - 8) * (xr[1] - xr[0]), yr[0] + (H - pad - py) / (H - pad - 8) * (yr[1] - yr[0]))};
+}
+function linha(g, pts, X, Y, cor, larg = 1.6, tracejado = []) {
+  g.strokeStyle = cor; g.lineWidth = larg; g.setLineDash(tracejado); g.beginPath(); let on = false;
+  for (const [x, y] of pts) { if (!isFinite(x) || !isFinite(y)) { on = false; continue; } if (on) g.lineTo(X(x), Y(y)); else { g.moveTo(X(x), Y(y)); on = true; } }
+  g.stroke(); g.setLineDash([]);
+}
+
+let sMap = null;
+function desenharPlanoS(m) {
+  const ctx = prep($("cs"));
+  const todos = m.P.concat(m.Z);
+  const ext = Math.max(4, ...todos.map(r => Math.max(Math.abs(r.re), Math.abs(r.im))) ) * 1.4;
+  const ax = eixos(ctx, [-ext, ext * 0.6], [-ext * 0.75, ext * 0.75]); sMap = ax;
+  // lugar das raízes (K de 0 a K_max com mesmo sinal de K)
+  let den = m.den, num0 = polyFromRoots(m.Z);
+  if (st.tau) { const pd = pade(st.tau, 3); den = polyMul(den, pd.den); num0 = polyMul(num0, pd.num); }
+  const sg = st.k >= 0 ? 1 : -1, ramos = [];
+  let prev = roots(den);
+  for (let i = 0; i <= 260; i++) {
+    const k = sg * 10 ** (-3 + 7 * i / 260) * Math.abs(den[0] / (num0[0] || 1));
+    let r = roots(polyAdd(den, polyScale(num0, k)));
+    const ord = prev.map(p => { let bj = 0, bd = Infinity; r.forEach((q, j) => { const dd = abs(sub(p, q)); if (dd < bd) { bd = dd; bj = j; } }); const q = r[bj]; r = r.filter((_, j) => j !== bj); return q || p; });
+    ramos.push(ord); prev = ord;
+  }
+  const cores = [css("--accent"), css("--good"), css("--alt"), css("--bad")];
+  for (let j = 0; j < (ramos[0] || []).length; j++) linha(ctx.g, ramos.map(r => [r[j].re, r[j].im]), ax.X, ax.Y, cores[j % 4], 1.2);
+  // polos de malha fechada atuais
+  const pmf = st.tau ? roots(polyAdd(den, polyScale(num0, st.k))) : roots(polyAdd(m.den, m.num));
+  ctx.g.fillStyle = css("--ink"); pmf.forEach(p => { ctx.g.beginPath(); ctx.g.arc(ax.X(p.re), ax.Y(p.im), 3.2, 0, 7); ctx.g.fill(); });
+  ctx.g.lineWidth = 2; ctx.g.strokeStyle = css("--bad");
+  m.P.forEach(p => { const x = ax.X(p.re), y = ax.Y(p.im); ctx.g.beginPath(); ctx.g.moveTo(x - 5, y - 5); ctx.g.lineTo(x + 5, y + 5); ctx.g.moveTo(x + 5, y - 5); ctx.g.lineTo(x - 5, y + 5); ctx.g.stroke(); });
+  m.Z.forEach(z => { ctx.g.beginPath(); ctx.g.arc(ax.X(z.re), ax.Y(z.im), 5, 0, 7); ctx.g.stroke(); });
+}
+function desenharNyquist(m) {
+  const ctx = prep($("cn"));
+  const ws = Array.from({length: 2500}, (_, i) => 10 ** (-3 + 5.5 * i / 2499));
+  const pts = ws.map(w => m.L(C(0, w))).map(z => [z.re, z.im]);
+  const lim = Math.min(Math.max(2, ...pts.map(p => Math.hypot(...p)).filter(isFinite).map(v => Math.min(v, 12))) * 1.1, 12);
+  const ax = eixos(ctx, [-lim, lim], [-lim * 0.75, lim * 0.75]);
+  const clip = p => (Math.abs(p[0]) > 3 * lim || Math.abs(p[1]) > 3 * lim) ? [NaN, NaN] : p;
+  linha(ctx.g, pts.map(clip), ax.X, ax.Y, css("--accent"), 1.8);
+  linha(ctx.g, pts.map(p => clip([p[0], -p[1]])), ax.X, ax.Y, css("--accent"), 1, [5, 4]);
+  ctx.g.strokeStyle = css("--bad"); ctx.g.lineWidth = 2.5; const x = ax.X(-1), y = ax.Y(0);
+  ctx.g.beginPath(); ctx.g.moveTo(x - 6, y - 6); ctx.g.lineTo(x + 6, y + 6); ctx.g.moveTo(x + 6, y - 6); ctx.g.lineTo(x - 6, y + 6); ctx.g.stroke();
+}
+function desenharDegrau(m) {
+  const ctx = prep($("cy"));
+  const ys = degrau(m);
+  const yv = ys.map(p => p[1]);
+  const lo = Math.min(-0.2, ...yv), hi = Math.max(1.4, ...yv);
+  const ax = eixos(ctx, [0, 20], [Math.max(lo, -3), Math.min(hi, 4)]);
+  linha(ctx.g, [[0, 1], [20, 1]], ax.X, ax.Y, css("--muted"), 1, [3, 3]);
+  linha(ctx.g, ys, ax.X, ax.Y, css("--good"), 1.8);
+}
+function desenharBode(m) {
+  const ctx = prep($("cb"));
+  const ws = Array.from({length: 800}, (_, i) => 10 ** (-2 + 4 * i / 799));
+  const mag = ws.map(w => 20 * Math.log10(abs(m.L(C(0, w)))));
+  const ax = eixos(ctx, [-2, 2], [-60, 40]);
+  linha(ctx.g, ws.map((w, i) => [Math.log10(w), mag[i]]), ax.X, ax.Y, css("--accent"), 1.8);
+  // fase escalada: -360°..0° mapeada em -60..40 dB
+  const fase = w => { const s = C(0, w); let f = (st.k >= 0 ? 0 : Math.PI); m.Z.forEach(z => f += arg(sub(s, z))); m.P.forEach(p => f -= arg(sub(s, p))); return (f - w * st.tau) * 180 / Math.PI; };
+  let f0 = fase(ws[0]); const off = 360 * Math.ceil((f0 - 1e-9) / 360);
+  linha(ctx.g, ws.map(w => [Math.log10(w), -60 + (fase(w) - off + 360) / 360 * 100]), ax.X, ax.Y, css("--alt"), 1.4, [6, 3]);
+  linha(ctx.g, [[-2, -60 + 180 / 360 * 100], [2, -60 + 180 / 360 * 100]], ax.X, ax.Y, css("--alt"), 0.8, [2, 3]);
+}
+
+function atualizar() {
+  const m = model();
+  const ny = nyquist(m), mg = margens(m);
+  $("kv").textContent = st.k.toPrecision(4); $("tauv").textContent = st.tau.toFixed(3);
+  const est = ny.Z === 0;
+  $("badge").textContent = est ? "ESTÁVEL" : "INSTÁVEL"; $("badge").className = "badge " + (est ? "ok" : "no");
+  const f = (v, d = 3) => isFinite(v) ? v.toFixed(d) : "∞";
+  $("status").textContent =
+    `P = ${ny.P}   N = ${ny.N}   Z = N + P = ${ny.Z}\n` +
+    `MG = ${f(mg.mg)} (${f(20 * Math.log10(mg.mg), 2)} dB) em ω = ${f(mg.wpc)}\n` +
+    `MF = ${f(mg.mf, 2)}° em ω = ${f(mg.wgc)}\n` +
+    `Margem de atraso = ${f(mg.dm)} s`;
+  desenharPlanoS(m); desenharNyquist(m); desenharDegrau(m); desenharBode(m);
+}
+
+function aplicarPreset(k) {
+  const p = PRESETS[k];
+  st.polos = parseList(p.p).filter(r => r.im >= 0); st.zeros = parseList(p.z).filter(r => r.im >= 0);
+  st.k = p.k; st.sinal = Math.sign(p.k); st.tau = p.tau;
+  $("polos").value = p.p; $("zeros").value = p.z;
+  $("k").value = Math.log10(Math.abs(p.k)); $("tau").value = p.tau;
+  atualizar();
+}
+$("preset").onchange = e => aplicarPreset(e.target.value);
+$("polos").onchange = e => { st.polos = parseList(e.target.value).filter(r => r.im >= 0); atualizar(); };
+$("zeros").onchange = e => { st.zeros = parseList(e.target.value).filter(r => r.im >= 0); atualizar(); };
+// slider de K em escala log com sinal: valor v -> K = sign(v) 10^|v| (|v|<0.01 ~ 0)
+// slider de K em escala log (|K| = 10^v); o sinal vem do sistema (ex.: C usa K(1-s) = -K(s-1))
+$("k").oninput = e => { st.k = st.sinal * 10 ** (+e.target.value); atualizar(); };
+$("tau").oninput = e => { st.tau = +e.target.value; atualizar(); };
+$("tema").onclick = () => { const r = document.documentElement; const escuro = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = escuro ? "light" : "dark"; atualizar(); };
+
+// arrastar polos/zeros no plano s
+let alvo = null;
+$("cs").addEventListener("pointerdown", e => {
+  const r = e.target.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  let best = 12;
+  [["polos", st.polos], ["zeros", st.zeros]].forEach(([nome, lista]) => lista.forEach((q, i) => {
+    for (const sg of [1, -1]) { const d = Math.hypot(sMap.X(q.re) - px, sMap.Y(sg * q.im) - py); if (d < best) { best = d; alvo = {nome, i}; } }
+  }));
+  if (alvo) e.target.setPointerCapture(e.pointerId);
+});
+$("cs").addEventListener("pointermove", e => {
+  if (!alvo) return;
+  const r = e.target.getBoundingClientRect(); const s = sMap.inv(e.clientX - r.left, e.clientY - r.top);
+  const q = C(+s.re.toFixed(3), Math.abs(s.im) < 0.15 ? 0 : +Math.abs(s.im).toFixed(3));
+  st[alvo.nome][alvo.i] = q;
+  $(alvo.nome).value = st[alvo.nome].map(fmtC).join(", ");
+  atualizar();
+});
+$("cs").addEventListener("pointerup", () => alvo = null);
+window.addEventListener("resize", atualizar);
+aplicarPreset("D");
+</script>
+</body>
+</html>
